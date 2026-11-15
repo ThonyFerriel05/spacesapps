@@ -1,133 +1,53 @@
-# Cómo conectar la simulación con Firebase
+# Conexión con Firebase
 
-La idea es que **la simulación escribe** en Firebase cada vez que cambia algo y **la app solo escucha**.
-Así las dos muestran siempre lo mismo y nunca se pisan.
+**La app manda y la simulación obedece.**
 
-Todo el cambio va en un solo archivo: `scripts/main.gd`. No hace falta instalar nada en Godot.
-Funciona también en la versión web, porque usa la API REST de Firestore (es una llamada por internet normal).
-
----
-
-## 1. En Firebase (Firestore)
-
-**Reglas.** La simulación es una página pública y no tiene usuario, así que necesita permiso para escribir **solo** en esta colección.
-En Firestore → Reglas, agrega esto dentro de `match /databases/{database}/documents { ... }`:
+La simulación pregunta cada 1 segundo el valor de esta ruta en Firebase Realtime Database:
 
 ```
-match /simulation_controls/{doc} {
-  allow read, write: if true;
-}
+https://thedox-spacehealth-default-rtdb.firebaseio.com/simulation_controls/active_scenario
 ```
 
-Deja cerradas las demás colecciones. Esta regla abierta está bien para la hackathon, no para producción.
+| Valor que pone la app | Qué hace la simulación |
+|---|---|
+| `"normal"` (o vacío) | Sigue su historia sola, con sus propias emergencias en cada etapa |
+| `"warning"` | Fuerza ADVERTENCIA en cualquier etapa |
+| `"solarFlare"` | Fuerza CRÍTICO por tormenta solar |
+| `"hypoxia"` | Fuerza CRÍTICO por falta de oxígeno |
 
-**Qué se va a escribir.** Un solo documento: `simulation_controls/active_scenario`, con estos campos:
+Cuando la app fuerza una emergencia, cambia el estado de la cámara de cabina (color y texto), la reacción del astronauta y el texto de "qué siente la tripulación".
+Apenas la app vuelve a `"normal"`, la simulación sigue con su historia en menos de un segundo.
 
-| Campo | Tipo | Ejemplo |
-|---|---|---|
-| `scenario` | texto | `normal`, `warning`, `solarFlare` o `hypoxia` |
-| `stage` | número entero | `3` (de 1 a 8) |
-| `stage_name` | texto | `ÓRBITA TERRESTRE` |
-| `g` | número | `0.2` |
-| `speed_kmh` | número | `27670` |
-| `distance_km` | número | `185` |
-| `updated_at` | fecha | hora del último cambio |
+Los nombres tienen que ser **exactamente** esos (mayúsculas incluidas). Cualquier otro valor se toma como `"normal"`.
 
-Los nombres de `scenario` tienen que ser **exactamente** iguales a los de tu app (mayúsculas incluidas).
-
----
-
-## 2. En `scripts/main.gd`
-
-**a) Arriba, junto a las otras constantes** (por ejemplo debajo de `const ASTRO_SCRIPT`), pega esto y pon el ID de tu proyecto:
-
-```gdscript
-const FIREBASE_PROJECT := "TU_PROJECT_ID"   # Configuración del proyecto en Firebase → ID del proyecto
-const SYNC_EVERY := 2.0                     # cada cuántos segundos manda los números aunque no cambie el estado
-var sync_t := 0.0
-```
-
-**b) Agrega esta función** (por ejemplo debajo de la función `_scenario`):
-
-```gdscript
-## Manda el estado actual a Firestore: simulation_controls/active_scenario
-func _push_state() -> void:
-	if FIREBASE_PROJECT == "TU_PROJECT_ID":
-		return
-	var url := "https://firestore.googleapis.com/v1/projects/%s/databases/(default)/documents/simulation_controls/active_scenario" % FIREBASE_PROJECT
-	var body := {
-		"fields": {
-			"scenario": {"stringValue": scenario},
-			"stage": {"integerValue": str(stage + 1)},
-			"stage_name": {"stringValue": STAGES[stage].name},
-			"g": {"doubleValue": snappedf(tel_g, 0.1)},
-			"speed_kmh": {"doubleValue": round(tel_v)},
-			"distance_km": {"doubleValue": round(tel_d)},
-			"updated_at": {"timestampValue": Time.get_datetime_string_from_system(true) + "Z"},
-		}
-	}
-	var req := HTTPRequest.new()
-	add_child(req)
-	req.request_completed.connect(func(_result, code, _headers, _body):
-		if code != 200:
-			push_warning("Firebase respondió %d" % code)
-		req.queue_free())
-	req.request(url, ["Content-Type: application/json"], HTTPClient.METHOD_PATCH, JSON.stringify(body))
-```
-
-**c) Llámala en tres lugares:**
-
-1. Dentro de `_scenario(s)`, al final (después de `astro.state = s`):
-   ```gdscript
-   	_push_state()
-   ```
-2. Dentro de `_enter(i)`, al final de la función (después del `match i:`), para avisar el cambio de etapa:
-   ```gdscript
-   	_push_state()
-   ```
-3. Dentro de `_process(dt)`, al principio (después de `clock += dt`), para mandar los números cada 2 segundos:
-   ```gdscript
-   	sync_t += dt
-   	if sync_t >= SYNC_EVERY:
-   		sync_t = 0.0
-   		_push_state()
-   ```
-
-**Probar:** corre el proyecto con F5 y mira en la consola de Firebase cómo cambia el documento `active_scenario`.
-Si en la salida de Godot aparece `Firebase respondió 403`, son las reglas. Si sale `404`, revisa el ID del proyecto.
-
----
-
-## 3. En tu app: escuchar el documento
+## Para cambiar el estado desde la app
 
 Web (Firebase v9 o superior):
 
 ```js
-import { doc, onSnapshot } from "firebase/firestore";
-
-onSnapshot(doc(db, "simulation_controls", "active_scenario"), (snap) => {
-  const d = snap.data();
-  // d.scenario, d.stage, d.stage_name, d.g, d.speed_kmh, d.distance_km
-});
+import { getDatabase, ref, set } from "firebase/database";
+set(ref(getDatabase(), "simulation_controls/active_scenario"), "hypoxia");
 ```
 
 Android (Kotlin):
 
 ```kotlin
-Firebase.firestore.collection("simulation_controls").document("active_scenario")
-    .addSnapshotListener { snap, _ ->
-        val scenario = snap?.getString("scenario")
-        // ...
-    }
+Firebase.database.getReference("simulation_controls/active_scenario").setValue("hypoxia")
 ```
 
----
+## En el código
 
-## 4. Volver a publicar la versión web
+Todo está en `scripts/main.gd`, en la sección **FIREBASE** (`_start_firebase`, `_poll_firebase`, `_on_firebase`).
+La URL está en la constante `FIREBASE_URL` y los textos de cada emergencia en `REMOTE_FEEL`.
+Si no hay internet o Firebase no responde, la simulación sigue sola sin trabarse.
+
+La regla de lectura de `simulation_controls` tiene que estar abierta (`".read": true`), porque la simulación es una página pública sin usuario.
+
+## Volver a publicar la versión web
 
 El link (`https://thonyferriel05.github.io/spacesapps/`) muestra lo que está en la carpeta `docs/`. Después de cambiar el código:
 
 1. En Godot: **Editor → Manage Export Templates → Download and Install** (solo la primera vez).
-2. **Project → Export**. Ya hay un preset llamado **Web** que exporta a `docs/index.html`, con "Thread Support" apagado (así funciona en GitHub Pages).
-3. **Export Project** → guarda en `docs/index.html` → desmarca "Export With Debug".
-4. Haz commit y push. En un minuto el link ya tiene la versión nueva.
+2. **Project → Export → Web** (ya configurado para guardar en `docs/index.html`, con "Thread Support" apagado).
+3. **Export Project**, desmarca "Export With Debug", guarda.
+4. Commit y push. En un minuto el link ya tiene la versión nueva.
