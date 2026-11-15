@@ -166,6 +166,7 @@ var last_synced := ""   # último estado que la simulación escribió (o aceptó
 var state_t := 0.0
 var fb_sent_at := 0.0   # cuándo se hizo la última pregunta
 var wrote_at := -100.0  # cuándo escribimos el estado por última vez
+var fb_heard := false   # ya leímos Firebase al menos una vez (antes de eso no escribimos nada)
 var tel_g := 1.0        # fuerza G
 var tel_v := 0.0        # velocidad en km/h
 var tel_d := 0.0        # altitud o distancia a la Tierra en km
@@ -813,6 +814,7 @@ func _on_firebase(_result: int, code: int, _headers: PackedStringArray, body: Pa
 		print("Firebase: sin respuesta (resultado %d, código %d)" % [_result, code])
 		return              # sin internet o error: la simulación sigue sola
 	var j = JSON.parse_string(body.get_string_from_utf8())
+	fb_heard = true
 	if fb_sent_at < wrote_at + 1.5:
 		return              # la pregunta salió antes de que terminara de llegar lo que escribimos: respuesta vieja
 	if not j is String or j == last_synced:
@@ -838,7 +840,7 @@ func _put(path: String, data) -> void:
 ## La simulación avisa a la app cuando su propia historia cambia de estado
 ## (por ejemplo, empieza la tormenta solar). Si la app está mandando, no escribe nada.
 func _push_scenario() -> void:
-	if remote != "" or scenario == last_synced:
+	if not fb_heard or remote != "" or scenario == last_synced:
 		return
 	last_synced = scenario
 	wrote_at = clock
