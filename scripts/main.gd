@@ -10,6 +10,16 @@ const MOON := "res://models/la_luna__viaje_virtual_guiado__3d___vr.glb"
 const ASTRO := "res://models/astronautin.glb"
 const ASTRO_SCRIPT := preload("res://scripts/astronaut.gd")
 
+## Estado que manda la app (Firebase Realtime Database).
+const FIREBASE_URL := "https://thedox-spacehealth-default-rtdb.firebaseio.com/simulation_controls/active_scenario.json"
+const FIREBASE_EVERY := 1.0   # cada cuántos segundos pregunta
+## Si la app manda una emergencia, se muestra este texto en vez del de la etapa.
+const REMOTE_FEEL := {
+	"warning": "Alerta enviada desde la app: la tripulación revisa los sistemas y se ajusta los cinturones.",
+	"solarFlare": "Tormenta solar: la radiación sube de golpe. Qué hacer: refugiarse entre las bolsas de carga.",
+	"hypoxia": "Baja el oxígeno: mareo y visión borrosa. Qué hacer: máscara de oxígeno y cerrar la fuga.",
+}
+
 const GREEN := Color("4ade80")
 const YELLOW := Color("facc15")
 const RED := Color("f87171")
@@ -147,6 +157,9 @@ var prev_u := 0.0
 var clock := 0.0
 var playing := true
 var scenario := "normal"
+var remote := ""        # emergencia que manda la app ("" = la simulación decide sola)
+var fb_req: HTTPRequest
+var fb_busy := false
 var tel_g := 1.0        # fuerza G
 var tel_v := 0.0        # velocidad en km/h
 var tel_d := 0.0        # altitud o distancia a la Tierra en km
@@ -165,20 +178,7 @@ func _ready() -> void:
 		_snapshots()
 	if FileAccess.file_exists("res://_pruebas/fps.flag"):
 		_fps_test()
-	
-	# --- CONEXIÓN AUTOMÁTICA CON FIREBASE ---
-	var req = HTTPRequest.new()
-	add_child(req)
-	req.request_completed.connect(func(res, code, headers, body):
-		if code == 200:
-			var j = JSON.parse_string(body.get_string_from_utf8())
-			if j is String: _scenario(j)
-	)
-	var t = Timer.new()
-	t.wait_time = 2.0
-	t.autostart = true
-	t.timeout.connect(func(): req.request("https://thedox-spacehealth-default-rtdb.firebaseio.com/simulation_controls/active_scenario.json"))
-	add_child(t)
+	_start_firebase()
 
 # =====================================================================
 #  CONSTRUCCIÓN
@@ -769,10 +769,46 @@ func _orion_play(anim: String) -> void:
 ## Cambia el escenario de salud (el mismo nombre que usa la app de Diego).
 ## AQUÍ se conectará Firebase: escribir simulation_controls/active_scenario.
 func _scenario(s: String) -> void:
+	if remote != "":        # lo que manda la app gana sobre la etapa
+		s = remote
 	if s == scenario:
 		return
 	scenario = s
 	astro.state = s
+
+# =====================================================================
+#  FIREBASE: la app manda el estado y la simulación obedece
+#  "normal" (o nada) = la simulación sigue su historia sola
+#  "warning" / "solarFlare" / "hypoxia" = se fuerza ese estado
+# =====================================================================
+func _start_firebase() -> void:
+	fb_req = HTTPRequest.new()
+	fb_req.timeout = 5.0
+	add_child(fb_req)
+	fb_req.request_completed.connect(_on_firebase)
+	var t := Timer.new()
+	t.wait_time = FIREBASE_EVERY
+	t.autostart = true
+	t.timeout.connect(_poll_firebase)
+	add_child(t)
+	_poll_firebase()
+
+func _poll_firebase() -> void:
+	if fb_busy:             # todavía no respondió la pregunta anterior
+		return
+	if fb_req.request(FIREBASE_URL) == OK:
+		fb_busy = true
+
+func _on_firebase(_result: int, code: int, _headers: PackedStringArray, body: PackedByteArray) -> void:
+	fb_busy = false
+	if code != 200:
+		print("Firebase: sin respuesta (resultado %d, código %d)" % [_result, code])
+		return              # sin internet o error: la simulación sigue sola
+	var j = JSON.parse_string(body.get_string_from_utf8())
+	var r: String = j if j is String and REMOTE_FEEL.has(j) else ""
+	if r != remote:
+		print("Firebase: la app manda '%s'" % (r if r != "" else "normal"))
+	remote = r
 
 # =====================================================================
 #  ETAPAS
@@ -1096,6 +1132,8 @@ func _process(dt: float) -> void:
 	var u: float = clampf(t_stage / dur, 0.0, 1.0)
 	_update(stage, u)
 	prev_u = u
+	if remote != "":
+		feel = REMOTE_FEEL[remote]
 
 	fade_a = move_toward(fade_a, 0.0, dt * 2.5)
 	flash_a = move_toward(flash_a, 0.0, dt * 1.6)
