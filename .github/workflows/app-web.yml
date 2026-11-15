@@ -1,0 +1,42 @@
+# Arma la versión web de la app de Diego (THEDOX Space Health, Flutter)
+# y la publica en docs/app/ -> https://thonyferriel05.github.io/spacesapps/app/
+name: App web de Diego
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths: [ ".github/workflows/app-web.yml" ]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Bajar el código de la app
+        run: git clone --depth 1 https://github.com/limpiador-satelite-norte/thedox-space-health app_src
+
+      - name: Instalar Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Armar la versión web
+        working-directory: app_src
+        run: |
+          flutter pub get
+          flutter build web --release --base-href /spacesapps/app/
+
+      - name: Publicar en docs/app
+        run: |
+          rm -rf docs/app
+          cp -r app_src/build/web docs/app
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/app
+          git commit -m "App web de Diego actualizada" || exit 0
+          git push
