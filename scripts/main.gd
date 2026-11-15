@@ -185,7 +185,8 @@ func _ready() -> void:
 		_snapshots()
 	if FileAccess.file_exists("res://_pruebas/fps.flag"):
 		_fps_test()
-	_start_firebase()
+	if not FileAccess.file_exists("res://_pruebas/snap.flag"):
+		_start_firebase()   # en modo capturas no se toca Firebase
 
 # =====================================================================
 #  CONSTRUCCIÓN
@@ -1275,7 +1276,7 @@ func _fps_test() -> void:
 # =====================================================================
 func _snapshots() -> void:
 	playing = false
-	var shots := [[0, 0.85], [5, 0.35]]
+	var shots := [[0, 0.6], [2, 0.2], [3, 0.5], [4, 0.6], [5, 0.4], [6, 0.4], [7, 0.7]]
 	var last := -1
 	for s in shots:
 		var i: int = s[0]
