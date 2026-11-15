@@ -11,8 +11,10 @@ const ASTRO := "res://models/astronautin.glb"
 const ASTRO_SCRIPT := preload("res://scripts/astronaut.gd")
 
 ## Estado que manda la app (Firebase Realtime Database).
-const FIREBASE_URL := "https://thedox-spacehealth-default-rtdb.firebaseio.com/simulation_controls/active_scenario.json"
+const DB_URL := "https://thedox-spacehealth-default-rtdb.firebaseio.com"
+const FIREBASE_URL := DB_URL + "/simulation_controls/active_scenario.json"
 const FIREBASE_EVERY := 1.0   # cada cuántos segundos pregunta
+const STATE_EVERY := 2.0      # cada cuántos segundos manda etapa, G, velocidad y distancia
 ## Si la app manda una emergencia, se muestra este texto en vez del de la etapa.
 const REMOTE_FEEL := {
 	"warning": "Alerta enviada desde la app: la tripulación revisa los sistemas y se ajusta los cinturones.",
@@ -160,6 +162,10 @@ var scenario := "normal"
 var remote := ""        # emergencia que manda la app ("" = la simulación decide sola)
 var fb_req: HTTPRequest
 var fb_busy := false
+var last_synced := ""   # último estado que la simulación escribió (o aceptó) en Firebase
+var state_t := 0.0
+var fb_sent_at := 0.0   # cuándo se hizo la última pregunta
+var wrote_at := -100.0  # cuándo escribimos el estado por última vez
 var tel_g := 1.0        # fuerza G
 var tel_v := 0.0        # velocidad en km/h
 var tel_d := 0.0        # altitud o distancia a la Tierra en km
@@ -777,9 +783,10 @@ func _scenario(s: String) -> void:
 	astro.state = s
 
 # =====================================================================
-#  FIREBASE: la app manda el estado y la simulación obedece
-#  "normal" (o nada) = la simulación sigue su historia sola
-#  "warning" / "solarFlare" / "hypoxia" = se fuerza ese estado
+#  FIREBASE, en los dos sentidos:
+#  - La app manda "warning" / "solarFlare" / "hypoxia" -> la simulación lo obedece.
+#  - La app manda "normal" -> la simulación sigue su historia sola.
+#  - La historia de la simulación cambia de estado -> se lo avisa a la app.
 # =====================================================================
 func _start_firebase() -> void:
 	fb_req = HTTPRequest.new()
@@ -798,6 +805,7 @@ func _poll_firebase() -> void:
 		return
 	if fb_req.request(FIREBASE_URL) == OK:
 		fb_busy = true
+		fb_sent_at = clock
 
 func _on_firebase(_result: int, code: int, _headers: PackedStringArray, body: PackedByteArray) -> void:
 	fb_busy = false
@@ -805,10 +813,46 @@ func _on_firebase(_result: int, code: int, _headers: PackedStringArray, body: Pa
 		print("Firebase: sin respuesta (resultado %d, código %d)" % [_result, code])
 		return              # sin internet o error: la simulación sigue sola
 	var j = JSON.parse_string(body.get_string_from_utf8())
-	var r: String = j if j is String and REMOTE_FEEL.has(j) else ""
+	if fb_sent_at < wrote_at + 1.5:
+		return              # la pregunta salió antes de que terminara de llegar lo que escribimos: respuesta vieja
+	if not j is String or j == last_synced:
+		return              # vacío, o es lo mismo que escribimos nosotros: no es una orden de la app
+	var r: String = j if REMOTE_FEEL.has(j) else ""
 	if r != remote:
 		print("Firebase: la app manda '%s'" % (r if r != "" else "normal"))
 	remote = r
+	last_synced = j         # ya está en Firebase, no hace falta volver a escribirlo
+
+## Escribe un valor en Firebase (sin esperar respuesta).
+func _put(path: String, data) -> void:
+	var req := HTTPRequest.new()
+	req.timeout = 5.0
+	add_child(req)
+	req.request_completed.connect(func(_r, code, _h, _b):
+		if code != 200:
+			print("Firebase: no se pudo escribir %s (código %d)" % [path, code])
+		req.queue_free())
+	req.request("%s/%s.json" % [DB_URL, path], ["Content-Type: application/json"],
+		HTTPClient.METHOD_PUT, JSON.stringify(data))
+
+## La simulación avisa a la app cuando su propia historia cambia de estado
+## (por ejemplo, empieza la tormenta solar). Si la app está mandando, no escribe nada.
+func _push_scenario() -> void:
+	if remote != "" or scenario == last_synced:
+		return
+	last_synced = scenario
+	wrote_at = clock
+	_put("simulation_controls/active_scenario", scenario)
+
+## Etapa, G, velocidad y distancia, por si la app quiere mostrarlos.
+func _push_state() -> void:
+	_put("simulation_controls/sim_state", {
+		"stage": stage + 1,
+		"stage_name": STAGES[stage].name,
+		"g": snappedf(tel_g, 0.1),
+		"speed_kmh": round(tel_v),
+		"distance_km": round(tel_d),
+	})
 
 # =====================================================================
 #  ETAPAS
@@ -1134,6 +1178,11 @@ func _process(dt: float) -> void:
 	prev_u = u
 	if remote != "":
 		feel = REMOTE_FEEL[remote]
+	_push_scenario()
+	state_t += dt
+	if state_t >= STATE_EVERY:
+		state_t = 0.0
+		_push_state()
 
 	fade_a = move_toward(fade_a, 0.0, dt * 2.5)
 	flash_a = move_toward(flash_a, 0.0, dt * 1.6)
